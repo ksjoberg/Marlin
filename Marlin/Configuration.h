@@ -853,6 +853,24 @@ const bool Z_MIN_PROBE_ENDSTOP_INVERTING = false; // set to true to invert the l
 //When using an LCD, uncomment the line below to display the Filament sensor data on the last line instead of status.  Status will appear for 5 sec.
 //#define FILAMENT_LCD_DISPLAY
 
+
+/**********************************************************************\
+ * Support for controlling a spindle via M3, M4 and M5
+ **********************************************************************/
+#define VFD_CONTROL
+
+#define MODBUS_CONTROL
+
+#if ENABLED(VFD_CONTROL)
+  #define VFD_ADDRESS 0x01
+  #if ENABLED(MODBUS_CONTROL)
+    #define SMART_CONTROLLER_SERIAL2_MOD
+  #else
+    #error Can't control the spindle -- no control interfaces defined
+  #endif
+#endif
+
+
 #include "Configuration_adv.h"
 #include "thermistortables.h"
 

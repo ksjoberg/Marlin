@@ -68,6 +68,10 @@
   #include <SPI.h>
 #endif
 
+#if ENABLED(MODBUS_CONTROL)
+  #include "modbus.h"
+#endif
+
 /**
  * Look here for descriptions of G-codes:
  *  - http://linuxcnc.org/handbook/gcode/g-code.html
@@ -720,6 +724,10 @@ void setup() {
   #ifdef STAT_LED_BLUE
     pinMode(STAT_LED_BLUE, OUTPUT);
     digitalWrite(STAT_LED_BLUE, LOW); // turn it off
+  #endif
+
+  #if ENABLED(MODBUS_CONTROL)
+    modbus_init();
   #endif
 }
 
@@ -3334,6 +3342,49 @@ inline void gcode_G92() {
 
 #endif // ULTIPANEL
 
+
+#if ENABLED(VFD_CONTROL)
+
+  /**
+   * M3: // M3 - Spindle on (CW) (positive rotation parameter)
+   * M4: // M4 - Spindle on (CCW) (negative rotation parameter)
+   * M5: // M5 - Spindle stop (zero RPM parameter)
+   */
+  inline void gcode_M3_M4_M5(int16_t rotation) {
+    char* args = current_command_args;
+
+    long rpm = 0;
+    bool hasS = false;
+    if (code_seen('S')) {
+      rpm = code_value_long(); // RPM
+      hasS = rpm > 0;
+    }
+
+    if (hasS)
+    {
+      st_synchronize();
+      refresh_cmd_timeout();
+#if ENABLED(MODBUS_CONTROL)
+      if (rotation > 0) { // CW
+        //modbus_send(VFD_ADDRESS, 2, "", 1, NULL, 0); // Write function code
+        spindlevfd_setrpm(VFD_ADDRESS, rpm);
+        spindlevfd_writecontrol(VFD_ADDRESS, 0x01); // FORWARD RUN
+      } else if (rotation < 0) { // CCW
+        spindlevfd_setrpm(VFD_ADDRESS, rpm);
+        spindlevfd_writecontrol(VFD_ADDRESS, 0x11); // REVERSE RUN
+      } else {
+        spindlevfd_writecontrol(VFD_ADDRESS, 0x08);
+      }
+#endif
+    } else {
+#if ENABLED(MODBUS_CONTROL)
+        spindlevfd_writecontrol(VFD_ADDRESS, 0x08);
+#endif
+    }
+  }
+
+#endif // VFD_CONTROL
+
 /**
  * M17: Enable power on all stepper motors
  */
@@ -5782,7 +5833,16 @@ void process_next_command() {
           gcode_M0_M1();
           break;
       #endif // ULTIPANEL
-
+      
+      #if ENABLED(VFD_CONTROL)
+        case 3: // M3 - Spindle on CW
+          gcode_M3_M4_M5(1); break;
+        case 4: // M4 - Spindle on CCW
+          gcode_M3_M4_M5(-1); break;
+        case 5: // M5 - Spindle stop
+          gcode_M3_M4_M5(0); break;
+      #endif
+                
       case 17:
         gcode_M17();
         break;
