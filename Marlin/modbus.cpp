@@ -38,7 +38,7 @@ ISR(USART2_TXC0_vect)
 }
 */
 
-#define VFD_RESPONSE_TIMEOUT  10000
+#define VFD_RESPONSE_TIMEOUT  500
 //#define MODBUS_LOCALECHO
 
 // Huanyang VFD
@@ -75,6 +75,8 @@ static uint16_t pd011 = 0;
 static uint16_t pd144 = 0;
 
 static millis_t last_command = 0;
+
+
 
 //===========================================================================
 //================================ functions ================================
@@ -138,7 +140,6 @@ void modbus_init() {
   pd144 = spindlevfd_readregister(VFD_ADDRESS, 144); // RPM @ 50Hz
   // 0x01 0x01 0x03 0x90 0x0B 0xB8 0x3B 0x21
 
-
   SERIAL_ECHO_START;
   SERIAL_ECHOPGM("MODBUS PD005: ");
   MYSERIAL.print(pd011, DEC);
@@ -154,14 +155,7 @@ void modbus_init() {
   MYSERIAL.print(pd144, DEC);
   SERIAL_EOL;
 
-  uint8_t c = spindlevfd_readcontrol(VFD_ADDRESS);
-  SERIAL_ECHO_START;
-  SERIAL_ECHOPGM("MODBUS CNTRL: ");
-  MYSERIAL.print(c, HEX);
-  SERIAL_EOL;
-
-  
-
+  spindlevfd_writecontrol(VFD_ADDRESS, 0x08); // STOP
 }
 
 
@@ -323,12 +317,12 @@ void spindlevfd_writeregister(uint8_t address, uint8_t reg, uint16_t value)
   return;
 }
 
-uint8_t spindlevfd_readcontrol(uint8_t address)
+uint16_t spindlevfd_readcontrol(uint8_t address, uint8_t cfg)
 {
   uint8_t data[3];
-  data[0] = 0;
+  data[0] = cfg;
   if (modbus_send(address, 0x04, data, 1, data, 3) > 0) {
-    return data[0];
+    return ((uint16_t)data[1])<<8 | data[2];
   }
   return 0;
 }
@@ -365,6 +359,10 @@ void spindlevfd_setrpm(uint8_t address, uint16_t rpm)
   return;
 }
 
+void spindlevfd_kill(uint8_t address)
+{
+  spindlevfd_writecontrol(address, 0x08); // STOP
+}
 
 
 #endif

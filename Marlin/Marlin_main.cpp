@@ -1201,6 +1201,20 @@ static void setup_for_endstop_move() {
   enable_endstops(true);
 }
 
+static void clean_up_after_endstop_move() {
+  #if ENABLED(ENDSTOPS_ONLY_FOR_HOMING)
+    #if ENABLED(DEBUG_LEVELING_FEATURE)
+      if (marlin_debug_flags & DEBUG_LEVELING) {
+        SERIAL_ECHOLNPGM("clean_up_after_endstop_move > ENDSTOPS_ONLY_FOR_HOMING > enable_endstops(false)");
+      }
+    #endif
+    enable_endstops(false);
+  #endif
+  feedrate = saved_feedrate;
+  feedrate_multiplier = saved_feedrate_multiplier;
+  refresh_cmd_timeout();
+}
+  
 #if ENABLED(AUTO_BED_LEVELING_FEATURE)
 
   #if ENABLED(DELTA)
@@ -1407,20 +1421,6 @@ static void setup_for_endstop_move() {
   inline void do_blocking_move_to_x(float x) { do_blocking_move_to(x, current_position[Y_AXIS], current_position[Z_AXIS]); }
   inline void do_blocking_move_to_z(float z) { do_blocking_move_to(current_position[X_AXIS], current_position[Y_AXIS], z); }
   inline void raise_z_after_probing() { do_blocking_move_to_z(current_position[Z_AXIS] + Z_RAISE_AFTER_PROBING); }
-
-  static void clean_up_after_endstop_move() {
-    #if ENABLED(ENDSTOPS_ONLY_FOR_HOMING)
-      #if ENABLED(DEBUG_LEVELING_FEATURE)
-        if (marlin_debug_flags & DEBUG_LEVELING) {
-          SERIAL_ECHOLNPGM("clean_up_after_endstop_move > ENDSTOPS_ONLY_FOR_HOMING > enable_endstops(false)");
-        }
-      #endif
-      enable_endstops(false);
-    #endif
-    feedrate = saved_feedrate;
-    feedrate_multiplier = saved_feedrate_multiplier;
-    refresh_cmd_timeout();
-  }
 
   static void deploy_z_probe() {
 
@@ -3267,6 +3267,93 @@ inline void gcode_G28() {
 
 #endif //AUTO_BED_LEVELING_FEATURE
 
+#if ENABLED(AUTO_TOOL_OFFSET_MEASUREMENT)
+  float run_z_measure()
+  {
+    float zLength = st_get_position_mm(Z_AXIS);
+    if (abs(max_pos[Z_AXIS] - zLength) > 0.01)
+    {
+      SERIAL_ECHOPAIR("Z not home: ", current_position[Z_AXIS]);
+      SERIAL_EOL;
+
+      HOMEAXIS(Z);
+      st_synchronize();
+    }
+
+    // Move down until the Z probe (or endstop?) is triggered
+    float zPosition = -(Z_MAX_LENGTH + 10);
+    line_to_z(zPosition);
+    st_synchronize();
+
+    // Tell the planner where we ended up - Get this from the stepper handler
+    zPosition = st_get_position_mm(Z_AXIS);
+    plan_set_position(current_position[X_AXIS], current_position[Y_AXIS], zPosition, current_position[E_AXIS]);
+
+    // move up the retract distance
+    zPosition += home_bump_mm(Z_AXIS);
+    line_to_z(zPosition);
+    st_synchronize();
+    endstops_hit_on_purpose(); // clear endstop hit flags
+
+    // move back down slowly to find bed
+    set_homing_bump_feedrate(Z_AXIS);
+
+    zPosition -= home_bump_mm(Z_AXIS) * 2;
+    line_to_z(zPosition);
+    st_synchronize();
+    endstops_hit_on_purpose(); // clear endstop hit flags
+
+    // Get the current stepper position after bumping the endstop and return the travel length
+    return zLength - st_get_position_mm(Z_AXIS);
+  }
+
+
+  /**
+   * G37: Automatic Tool Offset Measurement
+   * This G-code is optional and requires a probe.
+   * This G-code is used to set tool length offsets.
+   */
+  inline void gcode_G37() {
+    st_synchronize();
+    setup_for_endstop_move();
+
+    if (code_seen('F')) {
+      feedrate = code_value();
+    } else {
+      feedrate = homing_feedrate[Z_AXIS];
+    }
+
+    float zLength = run_z_measure();
+    float zProbeLength = 0;
+
+    SERIAL_ECHOPAIR("Measured Z axis to: ", zLength);
+    SERIAL_EOL;
+
+    if (code_seen('Z')) {
+      zProbeLength = code_value();
+    }
+    current_position[Z_AXIS] = zProbeLength;
+    sync_plan_position();
+    
+    clean_up_after_endstop_move();
+
+    // Move up again to starting position.
+    destination[Z_AXIS] = max_pos[Z_AXIS] = zLength + zProbeLength;
+    line_to_destination();
+    st_synchronize();
+    current_position[Z_AXIS] = st_get_position_mm(Z_AXIS);
+
+    SERIAL_PROTOCOLPGM("Bed X: ");
+    SERIAL_PROTOCOL(current_position[X_AXIS] + 0.0001);
+    SERIAL_PROTOCOLPGM(" Y: ");
+    SERIAL_PROTOCOL(current_position[Y_AXIS] + 0.0001);
+    SERIAL_PROTOCOLPGM(" Z: ");
+    SERIAL_PROTOCOL(current_position[Z_AXIS] + 0.0001);
+    SERIAL_EOL;
+
+  }
+#endif // AUTO_TOOL_OFFSET_MEASUREMENT
+
 /**
  * G92: Set current position to given X Y Z E
  */
@@ -3360,9 +3447,9 @@ inline void gcode_G92() {
       hasS = rpm > 0;
     }
 
+    st_synchronize();
     if (hasS)
     {
-      st_synchronize();
       refresh_cmd_timeout();
 #if ENABLED(MODBUS_CONTROL)
       if (rotation > 0) { // CW
@@ -3373,7 +3460,7 @@ inline void gcode_G92() {
         spindlevfd_setrpm(VFD_ADDRESS, rpm);
         spindlevfd_writecontrol(VFD_ADDRESS, 0x11); // REVERSE RUN
       } else {
-        spindlevfd_writecontrol(VFD_ADDRESS, 0x08);
+        spindlevfd_writecontrol(VFD_ADDRESS, 0x08); // STOP
       }
 #endif
     } else {
@@ -3381,7 +3468,28 @@ inline void gcode_G92() {
         spindlevfd_writecontrol(VFD_ADDRESS, 0x08);
 #endif
     }
+    // wait until RPM has been reached.
+    uint16_t targetf = spindlevfd_readcontrol(VFD_ADDRESS, SPINDLEVFD_CFG_SETF);
+    if (rotation == 0)
+    {
+      targetf = 0;
+    }
+
+    // Wait for the spindle to reach the set RPM (or stop).
+    uint16_t outf;
+    millis_t next_tick = 0;
+    do
+    {
+      millis_t ms = millis();
+      if (ms >= next_tick) {
+        outf = spindlevfd_readcontrol(VFD_ADDRESS, SPINDLEVFD_CFG_OUTF);
+        next_tick = ms + 500; // check every .5s while waiting
+      }
+
+      idle();
+    } while (outf != targetf);
   }
+
 
 #endif // VFD_CONTROL
 
@@ -5813,6 +5921,12 @@ void process_next_command() {
 
       #endif // AUTO_BED_LEVELING_FEATURE
 
+    #if ENABLED(AUTO_TOOL_OFFSET_MEASUREMENT)
+      case 37: // G37 Automatic Tool Offset Measurement
+        gcode_G37();
+        break;
+    #endif // AUTO_TOOL_OFFSET_MEASUREMENT
+    
       case 90: // G90
         relative_mode = false;
         break;
@@ -7131,7 +7245,18 @@ void kill(const char* lcd_msg) {
   #else
     UNUSED(lcd_msg);
   #endif
-
+  
+  #if ENABLED(VFD_CONTROL)
+  SERIAL_ERROR_START;
+  SERIAL_ERRORLNPGM("vfd kill");
+  spindlevfd_kill(VFD_ADDRESS);
+  SERIAL_ERROR_START;
+  SERIAL_ERRORLNPGM("vfd kill done");
+  #endif
+  
+  SERIAL_ERROR_START;
+  SERIAL_ERRORLNPGM("before cli");
+  
   cli(); // Stop interrupts
   disable_all_heaters();
   disable_all_steppers();
@@ -7140,6 +7265,7 @@ void kill(const char* lcd_msg) {
     pinMode(PS_ON_PIN, INPUT);
   #endif
 
+  
   SERIAL_ERROR_START;
   SERIAL_ERRORLNPGM(MSG_ERR_KILLED);
 

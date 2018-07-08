@@ -30,12 +30,22 @@ void modbus_init();
 int modbus_send(uint8_t address, uint8_t func, const uint8_t* msg, uint8_t len, uint8_t* rcvmsg, uint8_t rcvlen);
 
 
+#define SPINDLEVFD_CFG_SETF  0
+#define SPINDLEVFD_CFG_OUTF  1
+#define SPINDLEVFD_CFG_OUTA  2
+#define SPINDLEVFD_CFG_ROTT  3
+#define SPINDLEVFD_CFG_DCV   4
+#define SPINDLEVFD_CFG_ACV   5
+#define SPINDLEVFD_CFG_CONT  6
+#define SPINDLEVFD_CFG_TMP   7
+
 uint16_t spindlevfd_readregister(uint8_t address, uint8_t reg);
 void spindlevfd_writeregister(uint8_t address, uint8_t reg, uint16_t value);
-uint8_t spindlevfd_readcontrol(uint8_t address);
+uint16_t spindlevfd_readcontrol(uint8_t address, uint8_t cfg);
 void spindlevfd_writecontrol(uint8_t address, uint8_t control);
 void spindlevfd_setfrequency(uint8_t address, uint16_t freq);
 void spindlevfd_setrpm(uint8_t address, uint16_t rpm);
+void spindlevfd_kill(uint8_t address);
 
 #endif
 
