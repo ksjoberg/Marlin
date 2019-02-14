@@ -304,6 +304,10 @@
   #include <SPI.h>
 #endif
 
+#if ENABLED(MODBUS_CONTROL)
+  #include "modbus.h"
+#endif
+
 #if ENABLED(DAC_STEPPER_CURRENT)
   #include "stepper_dac.h"
 #endif
@@ -5886,6 +5890,103 @@ void home_all_axes() { gcode_G28(true); }
 
 #endif // AUTO_BED_LEVELING_UBL
 
+
+#if ENABLED(AUTO_TOOL_OFFSET_MEASUREMENT)
+  float run_z_measure(float feedrate)
+  {
+    float zLength = stepper.get_axis_position_mm(Z_AXIS);
+    if (abs(soft_endstop_max[Z_AXIS] - zLength) > 0.01)
+    {
+      SERIAL_ECHOPAIR("Z not home: ", current_position[Z_AXIS]);
+      SERIAL_EOL();
+
+      HOMEAXIS(Z);
+      stepper.synchronize();
+      zLength = stepper.get_axis_position_mm(Z_AXIS);
+    }
+
+    endstops.enable(true);
+    // Move down until the Z probe (or endstop?) is triggered
+    float zPosition = 0;
+    do_blocking_move_to_z(zPosition);
+    endstops.hit_on_purpose();
+
+    SERIAL_ECHOPAIR("Z min endstop hit at ", stepper.get_axis_position_mm(Z_AXIS));
+    SERIAL_EOL();
+    
+    // Tell the planner where we ended up - Get this from the stepper handler
+    current_position[Z_AXIS] = zPosition = stepper.get_axis_position_mm(Z_AXIS);
+    sync_plan_position();
+
+    SERIAL_ECHOPAIR("Now do Z bump at length (mm): ", home_bump_mm(Z_AXIS));
+    SERIAL_EOL();
+    const float bump = home_bump_mm(Z_AXIS);
+
+    endstops.enable(false);
+    // move up the retract distance
+    zPosition += bump;
+    do_blocking_move_to_z(zPosition);
+    //endstops.hit_on_purpose(); // clear endstop hit flags
+
+    endstops.enable(true);
+    // move back down slowly to find bed
+    do_homing_move(Z_AXIS, 2 * -bump, get_homing_bump_feedrate(Z_AXIS));
+    endstops.enable(false);
+    endstops.hit_on_purpose();
+
+    SERIAL_ECHOPAIR("zLength: ", zLength);
+    SERIAL_ECHOPAIR("currentPos: ", stepper.get_axis_position_mm(Z_AXIS));
+    SERIAL_EOL();
+    // Get the current stepper position after bumping the endstop and return the travel length
+    
+    return zLength - (zPosition+stepper.get_axis_position_mm(Z_AXIS));
+  }
+
+
+  /**
+   * G37: Automatic Tool Offset Measurement
+   * This G-code is optional and requires a probe.
+   * This G-code is used to set tool length offsets.
+   */
+  inline void gcode_G37() {
+    stepper.synchronize();
+    setup_for_endstop_or_probe_move();
+    float feedrate = 0.0;
+    if (parser.seenval('F')) {
+      feedrate = parser.floatval('F');
+    }
+
+    float zLength = run_z_measure(feedrate);
+    float zProbeLength = 0;
+
+    SERIAL_ECHOPAIR("Measured Z axis to: ", zLength);
+    SERIAL_EOL();
+
+    if (parser.seenval('Z')) {
+      zProbeLength = parser.floatval('Z');
+    }
+    current_position[Z_AXIS] = zProbeLength;
+    sync_plan_position();
+    
+    clean_up_after_endstop_or_probe_move();
+    
+    // Move up again to starting position.
+    soft_endstop_max[Z_AXIS] = zLength + zProbeLength;
+    do_blocking_move_to_z(zLength + zProbeLength);
+    current_position[Z_AXIS] = stepper.get_axis_position_mm(Z_AXIS);
+
+    SERIAL_PROTOCOLPGM("Bed X: ");
+    SERIAL_PROTOCOL(current_position[X_AXIS] + 0.0001);
+    SERIAL_PROTOCOLPGM(" Y: ");
+    SERIAL_PROTOCOL(current_position[Y_AXIS] + 0.0001);
+    SERIAL_PROTOCOLPGM(" Z: ");
+    SERIAL_PROTOCOL(current_position[Z_AXIS] + 0.0001);
+    SERIAL_EOL();
+
+  }
+#endif // AUTO_TOOL_OFFSET_MEASUREMENT
+
+
 /**
  * G92: Set current position to given X Y Z E
  */
@@ -6105,7 +6206,68 @@ inline void gcode_G92() {
     delay_for_power_down();
   }
 
-#endif // SPINDLE_LASER_ENABLE
+// SPINDLE_LASER_ENABLE
+#elif ENABLED(VFD_CONTROL) 
+
+  /**
+   * M3: // M3 - Spindle on (CW) (positive rotation parameter)
+   * M4: // M4 - Spindle on (CCW) (negative rotation parameter)
+   * M5: // M5 - Spindle stop (zero RPM parameter)
+   */
+  inline void gcode_M3_M4_M5(int16_t rotation) {
+
+    long rpm = 0;
+    bool hasS = false;
+    if (parser.seenval('S')) {
+      rpm = parser.value_long(); // RPM
+      hasS = rpm > 0;
+    }
+
+    stepper.synchronize();
+    if (hasS)
+    {
+      refresh_cmd_timeout();
+#if ENABLED(MODBUS_CONTROL)
+      if (rotation > 0) { // CW
+        //modbus_send(VFD_ADDRESS, 2, "", 1, NULL, 0); // Write function code
+        spindlevfd_setrpm(VFD_ADDRESS, rpm);
+        spindlevfd_writecontrol(VFD_ADDRESS, 0x01); // FORWARD RUN
+      } else if (rotation < 0) { // CCW
+        spindlevfd_setrpm(VFD_ADDRESS, rpm);
+        spindlevfd_writecontrol(VFD_ADDRESS, 0x11); // REVERSE RUN
+      } else {
+        spindlevfd_writecontrol(VFD_ADDRESS, 0x08);
+      }
+#endif
+    } else {
+#if ENABLED(MODBUS_CONTROL)
+        spindlevfd_writecontrol(VFD_ADDRESS, 0x08);
+#endif
+    }
+
+    // wait until RPM has been reached.
+    uint16_t targetf = spindlevfd_readcontrol(VFD_ADDRESS, SPINDLEVFD_CFG_SETF);
+    if (rotation == 0)
+    {
+      targetf = 0;
+    }
+
+    // Wait for the spindle to reach the set RPM (or stop).
+    uint16_t outf;
+    millis_t next_tick = 0;
+    do
+    {
+      millis_t ms = millis();
+      if (ms >= next_tick) {
+        outf = spindlevfd_readcontrol(VFD_ADDRESS, SPINDLEVFD_CFG_OUTF);
+        next_tick = ms + 500; // check every .5s while waiting
+      }
+
+      idle();
+    } while (outf != targetf);
+  }
+
+#endif // VFD_CONTROL
 
 /**
  * M17: Enable power on all stepper motors
@@ -10924,13 +11086,20 @@ void process_next_command() {
 
       #endif // PROBE_SELECTED
 
+
+      #if ENABLED(AUTO_TOOL_OFFSET_MEASUREMENT)
+        case 37: // G37 Automatic Tool Offset Measurement
+          gcode_G37();
+          break;
+      #endif // AUTO_TOOL_OFFSET_MEASUREMENT
+      
       #if ENABLED(G38_PROBE_TARGET)
         case 38: // G38.2 & G38.3
           if (parser.subcode == 2 || parser.subcode == 3)
             gcode_G38(parser.subcode == 2);
           break;
-      #endif
-
+      #endif      
+    
       case 90: // G90
         relative_mode = false;
         break;
@@ -10974,7 +11143,16 @@ void process_next_command() {
         case 5:
           gcode_M5();     // M5 - turn spindle/laser off
           break;          // synchronizes with movement commands
+      #elif ENABLED(VFD_CONTROL)
+        case 3: // M3 - Spindle on CW
+          gcode_M3_M4_M5(1); break;
+        case 4: // M4 - Spindle on CCW
+          gcode_M3_M4_M5(-1); break;
+        case 5: // M5 - Spindle stop
+          gcode_M3_M4_M5(0); break;
       #endif
+
+      
       case 17: // M17: Enable all stepper motors
         gcode_M17();
         break;
@@ -13260,6 +13438,14 @@ void kill(const char* lcd_msg) {
   #else
     UNUSED(lcd_msg);
   #endif
+  
+  #if ENABLED(VFD_CONTROL)
+  SERIAL_ERROR_START();
+  SERIAL_ERRORLNPGM("vfd kill");
+  spindlevfd_kill(VFD_ADDRESS);
+  SERIAL_ERROR_START();
+  SERIAL_ERRORLNPGM("vfd kill done");
+  #endif
 
   _delay_ms(600); // Wait a short time (allows messages to get out before shutting down.
   cli(); // Stop interrupts
@@ -13550,6 +13736,10 @@ void setup() {
       pe_deactivate_magnet(0);
       pe_deactivate_magnet(1);
     #endif
+  #endif
+
+  #if ENABLED(MODBUS_CONTROL)
+    modbus_init();
   #endif
 }
 

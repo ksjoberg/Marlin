@@ -1654,4 +1654,27 @@
   //#define FILAMENT_LCD_DISPLAY
 #endif
 
+
+/**********************************************************************\
+ * Support for controlling a spindle via M3, M4 and M5
+ **********************************************************************/
+#define VFD_CONTROL
+
+#define MODBUS_CONTROL
+
+#if ENABLED(VFD_CONTROL)
+  #define VFD_ADDRESS 0x01
+  #if ENABLED(MODBUS_CONTROL)
+    #define SMART_CONTROLLER_SERIAL2_MOD
+  #else
+    #error Can't control the spindle -- no control interfaces defined
+  #endif
+#endif
+
+
+/**********************************************************************\
+ * Support for doing a tool length measurement (for milling) via G37
+ **********************************************************************/
+#define AUTO_TOOL_OFFSET_MEASUREMENT
+
 #endif // CONFIGURATION_H
